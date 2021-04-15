@@ -1,0 +1,194 @@
+%macro pageno (indata=_last_, outdata=pg_final, mxlnpg= , grpvars= , debug=0, statvarc= , colsdlm= );
+
+%local grpvars_1 grpvars_2 grpvars_cs statvarc2 ;
+%let grpvars_1 = %scan(&grpvars, -1, " ");
+%put grpvars_1 = **&grpvars_1**;
+%let grpvars_2 = %scan(&grpvars, -2, " ");
+%put grpvars_2 = **&grpvars_2**;
+%if %bquote(&grpvars_2) = %str( ) %then %do;
+	%let grpvars_2= __cat;
+	%put grpvars_2 = **&grpvars_2**;
+%end;
+%let grpvars_cs = %qsysfunc(translate(%qsysfunc(compbl(%qsysfunc(strip(&grpvars)))), ",", " "));
+%put grpvars_cs = **&grpvars_cs**;
+%let statvarc2 = %qsysfunc(strip(&statvarc));
+%put statvarc2 = **&statvarc2**;
+%if %bquote(&colsdlm) ^= %str( ) %then %do;
+	%let _dlmvars= %scan(&colsdlm, 1, ",");
+	%let _dlmval= %left(%trim(%scan(&colsdlm, 2, ",")));
+%end;
+/*check to see if the input dataset already has "PG_BREAK" variable. If exists, then it is deleted*/
+proc sql noprint;
+	create table __in as
+	select *
+	from &indata
+	;
+	select count(*) into :varchk
+	from sashelp.vcolumn
+	where upcase(libname) = 'WORK' and upcase(memname) = "__IN" and upcase(name) = "PG_BREAK";
+quit;
+
+data __dset00 ; 
+set __in 	%if &varchk ^=0 %then %do;
+		%str((drop = pg_break _rows ))
+	%end;;
+	__lbln=_n_;
+run;
+/* Find number of rows required in listing or rtf output for text in each line of %nrbuqote(&statvarc) variable*/
+data __dset01;
+	set __dset00;
+	length nystr $1000;
+	str0= %scan(&statvarc2, 1, ",");
+	_width= %scan(&statvarc2, 2, ",");
+	_indent= lengthn(trim(str0))-lengthn(strip(str0));
+	_width2=_width-_indent;
+	if str0> ' ' then do;
+		%if &colsdlm ^=  %then %do; 
+			str= translate(str0, ' ', "%qsysfunc(compress(&_dlmval.))");
+		%end;
+		%else %do; 
+			str=str0;
+		%end;
+		str = strip(compbl(str));
+		do i = 1 to countw(str,' ');
+			word = scan(str,i,' ');
+			if length(nystr) + length(word) + 1 > _width2 then do;
+				output;
+				nystr = word;
+			end;
+			else nystr = catx(' ',nystr,scan(str,i,' '));
+		end;
+		if nystr ne '' then output;
+	end;
+	if str0= ' ' then output;	
+run;
+
+proc sort;
+	by __lbln;
+run;
+
+data __dset02;
+	set __dset01;
+	by __lbln;
+	if first.__lbln then _rows0=1;
+	else _rows0+1;
+	if last.__lbln;
+	keep __lbln _rows0;
+run;
+/*Find the maximum number of rows required for text in each line of 'statvarc' macro variable based on both text length and delimeters*/
+data __dset03;
+	merge __dset00 (in=_orig) __dset02(in=_der);
+	by __lbln;
+	if _orig and ^_der then _rows0=1;
+	__cat=1;
+
+%if %bquote(&colsdlm) ^= %str( ) %then %do;
+	array _colxx &_dlmvars ;
+	array _colyy 
+	%do i = 1 %to %sysfunc(countw(&_dlmvars));
+	 _arcol&i. %end;
+	;
+		do over _colxx;
+			_colyy= countc(_colxx, "&_dlmval");
+		end;
+	_dlmrows=max(of _colyy[*]);
+	/*if 'statvarc' macro variable is included in 'colsdlm' macro variable then only number of delimiters in 'statavarc' variable are considered
+		in assiging '_rows' for each row text value. Else we take maximum of delimters based rows to text length rows*/
+	if _dlmrows=0 then _dlmrows=1; /*if '0' delimiters, then value 1 row*/
+	else if _dlmrows>=1 then _dlmrows=_dlmrows+1; /*if 1 delimiter exist, the value takes 2 rows*/
+	%if %qsysfunc(index(&colsdlm, %scan(&statvarc2, 1, ","))) %then %str(_rows= _dlmrows;);
+	%else %str(_rows= max(_rows0, _dlmrows););
+	drop _ar: _dlmrows;
+	%put **&_dlmval**;
+%end;
+%else %do;
+	_rows= _rows0;
+%end;
+	drop _rows0;
+run;
+
+data __dset0;
+	set __dset03;
+	do __splitn= _rows to 1 by -1;
+		output;
+	end;
+run;
+/*derive 'PG_BREAK' variable*/
+data __dset1;
+	set __dset0;
+	by __cat &grpvars __lbln notsorted;
+	if first.&grpvars_1 then pgvar_rec = 1;
+	else pgvar_rec+1;
+	totaln= _n_;
+	if first.&grpvars_2 then __grpvars2_0=1;
+	__grpvars2 +__grpvars2_0;
+	if first.&grpvars_1 then __grpvars1_0=1;
+	__grpvars1 +__grpvars1_0;  
+	/*If a section has more rows than number of lines assigned in 'mxlnpg' macro variable then give a warning*/
+	if pgvar_rec > &mxlnpg then do;
+	  put "WARNING: One or more categories has more records than %nrstr(&mxlnpg) at: " &grpvars_1=  %scan(&statvarc2, 1, ",")=    ;
+      put "WARNING: If possible, increase %nrstr(&mxlnpg) value";
+  end;
+run;
+
+data __dset2;
+	set __dset1;
+	by __cat &grpvars __lbln notsorted;
+	retain remain_rec pg0 ;
+	if first.&grpvars_2 then do;
+		remain_rec=.;
+		pg0=.;
+	end;
+		if last.&grpvars_1 then do;
+		  if remain_rec=. then do;
+		    if pgvar_rec <= &mxlnpg then remain_rec = &mxlnpg - pgvar_rec;
+		    pg0 = 1;
+		  end;
+	      else if remain_rec ^=. then do;
+				if remain_rec >= pgvar_rec then do;
+					remain_rec= remain_rec - pgvar_rec ; 
+					pg0 +0;
+				end;
+				else if remain_rec < pgvar_rec then do;
+					remain_rec= &mxlnpg - pgvar_rec ; 
+					pg0 +1;
+				end;
+			end;
+		end;
+run;
+
+proc sql;
+	create table __dset3 as
+	select  *, max(pg0) as pg01
+	from __dset2
+	group by &grpvars_cs
+	order by totaln
+	;
+quit;
+
+data __dset4;
+	set __dset3;
+	by __cat &grpvars __lbln notsorted ;
+	retain PG_BREAK;
+		dif1 = dif(pg01);
+		if dif1>. then dif1=abs(dif1);
+		if first.&grpvars_2 and dif1 = 0 then dif1=1;
+		if __grpvars2=1 then PG_BREAK= pg01;
+		else if dif1>0 then PG_BREAK+1;
+run;
+
+data &outdata;
+	set __dset4;
+	where __splitn=1;
+	drop totaln remain_rec pg0 pg01 pgvar_rec __: dif1;
+run;
+/*delete intermediate datasets*/
+%if &debug ^= 1 %then %do ;
+	proc datasets nolist;
+		delete __: ;
+	run;
+%end;
+%mend;
+
+Sample call:
+%pageno (grpvars= avisit, statvarc= %str(text,30),  mxlnpg=18, colsdlm=%str(text col1 col2, |));
